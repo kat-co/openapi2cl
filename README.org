@@ -1,0 +1,71 @@
+#+TITLE: README
+
+* About
+
+This is a library for generating common-lisp clients from OpenAPI v2 specifications. It utilizes a [[https://semver.org/][semantic versioning]].
+
+This project is new, and although I believe it may be useful now, there are some caveats.
+
+1. The code has only been tested on Linux with SBCL. It is intended to be tested with other Lisp implementations.
+2. The generated code has not been tested very broadly, nor deeply.
+3. There are not very many unit tests written yet.
+4. This library is not yet in quicklisp. It will be.
+5. The code is not yet in it's final shape. I will not be accepting PRs until I'm happy with its shape. I am, however, very happy to receive readability PRs in the meantime.
+6. There is no guarantee of backwards compatibility until the first major release is done (probably v2.0.0 to coincide with OpenAPI v2).
+
+* How to Work with the Sourcecode
+
+You can compile the project by running: =make openapi2cl=.
+
+You can test the project by running =make test=.
+
+* How to Generate Code
+
+The library currently exports four functions:
+
+#+BEGIN_SRC common-lisp
+  (:export
+   #:with-directory-generate-files
+   #:with-directory-generate
+   #:with-yaml-generate
+   #:with-json-generate)
+#+END_SRC
+
+If you're intending to generate files, you most likely wish to use the =with-directory-generate-files= function. You can either pass it a pathname to a single file, or a pathname that matches multiple files, and it will generate =.lisp= files along-side these files. Here's an example which generates files for all the YAML files in a directory:
+
+=(openapi2cl/core:with-directory-generate-files #P"~/api/*.yaml")=
+
+This library currently supports YAML and JSON.
+
+* How to Utilize the Generated Code
+
+=openapi2cl= will generate a client and a list of methods. The client holds information you may wish to override; these variables are set with sensible defaults when possible. The only member-variable on the client you must set is =:http-request= which is called when HTTP requests are necessary.
+
+You will also likely want to populate the =encoder-from-media-type= hash-table with functions that understand how to encode common-lisp values into the requisite media-type.
+
+#+BEGIN_SRC common-lisp
+  (ql:quickload 'yason)
+  (ql:quickload 'drakma)
+
+  (defun make-http-request (uri &key method additional-headers content-type content parameters multipart-params)
+    (drakma:http-request uri
+                         :method method
+                         :additional-headers additional-headers
+                         :content-type content-type
+                         :parameters (append parameters multipart-params)
+                         :content content))
+
+  (defun main (username password)
+    (let ((client (make-instance 'my-client
+                                 :http-request #'make-http-request)))
+      (setf (gethash "json" (encoder-from-media-type client))
+            (lambda (e) (with-output-to-string (s) (yason:encode e s))))
+
+      (my-function client "arg1" :my-param "arg2")))
+#+END_SRC
+
+* FAQ
+
+** Is the generated source code also covered by the GPL v3?
+
+No. You are free to license the generated code as you see fit.
