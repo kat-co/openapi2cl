@@ -144,15 +144,6 @@ code."
   (or (find "https" schemes :test #'string=)
       (find "http" schemes :test #'string=)))
 
-(defun media-type-p (media-types)
-  (and (listp media-types)
-       (let ((media-subtypes (mapcar #'media-type-subtype media-types)))
-         (= (length media-subtypes)
-            ;; There are several other valid media-types, but these
-            ;; are the ones we can currently handle.
-            (length (intersection media-subtypes '("json" "yaml" "x-www-form-urlencoded")
-                                  :test #'string=))))))
-
 (defun media-type-form-p (media-type)
   (and media-type
        (find media-type '("application/x-www-form-urlencoded"
@@ -170,12 +161,11 @@ code."
     (or (find-if (lambda (e) (or (string= e "json") (string= e "yaml"))) media-subtypes)
         (nth (random (length media-subtypes)) media-subtypes))))
 
-(defun body-encode-param-p (media-type ))
-
-(defun generate-path-methods (client-name path-name path global-media-type)
+(defun generate-path-methods (client-name path-name path global-media-types)
   (check-type client-name symbol)
   (check-type path-name string)
   (check-type path hash-table)
+  (check-type global-media-types list)
   (loop for operation-name being the hash-keys of path
           using (hash-value operation)
         for summary = (gethash "summary" operation)
@@ -207,7 +197,7 @@ code."
                                                   (if param-descriptions param-descriptions))))
                 ;; Generate a method for each operation
                 (generate-operation-method client-name method-name method-comment schemes path-name
-                                           operation-name global-media-type consumes-media-types
+                                           operation-name global-media-types consumes-media-types
                                            produces-media-types required-parameters optional-parameters))))
 
 (defun generate-client (client-name schemes host base-path consumes-media-types produces-media-types)
@@ -216,8 +206,8 @@ code."
   (assert (openapi-schemes-p schemes))
   (check-type host string)
   (check-type base-path string)
-  (assert (media-type-p consumes-media-types))
-  (assert (media-type-p produces-media-types))
+  (check-type consumes-media-types list)
+  (check-type produces-media-types list)
   `(defclass ,client-name ()
      ((cl-user::scheme
        :type string
@@ -269,7 +259,7 @@ code."
        :accessor cl-user::encoder-from-media-type))))
 
 (defun generate-operation-method (client-name method-name method-comment schemes path
-                                  method global-media-type consumes-media-types produces-media-types
+                                  method global-media-types consumes-media-types produces-media-types
                                   required-parameters optional-parameters)
   "Generates a method for a generated client. Methods distinguish
 between required parameters and optional parameters, and optional
@@ -282,9 +272,9 @@ the provided values meet any defined constraints."
   (if schemes (assert (openapi-schemes-p schemes)))
   (check-type path string)
   (check-type method string)
-  (if global-media-type (assert (media-type-p global-media-type)))
-  (if consumes-media-types (assert (media-type-p consumes-media-types)))
-  (if produces-media-types (assert (media-type-p produces-media-types)))
+  (check-type global-media-types list)
+  (check-type consumes-media-types list)
+  (check-type produces-media-types list)
   (check-type required-parameters list)
   (check-type optional-parameters list)
   (let ((lisp-required-parameters (mapcar #'lisp-parameter-name required-parameters))
@@ -296,7 +286,10 @@ the provided values meet any defined constraints."
                                                                `(&key ,@lisp-optional-parameters)))
        ,method-comment
        ,@(generate-check-type (append required-parameters optional-parameters))
-       ,(let ((query-params (append
+       ,(let ((path-params (append
+                            (remove-if-not #'parameter-location-path-p required-parameters)
+                            (remove-if-not #'parameter-location-path-p optional-parameters)))
+              (query-params (append
                              (remove-if-not #'parameter-location-query-p required-parameters)
                              (remove-if-not #'parameter-location-query-p optional-parameters)))
               (headers (append
@@ -318,7 +311,8 @@ the provided values meet any defined constraints."
                     body-params nil)
               (setf body-params (append body-params form-params)
                     form-params nil))
-          `(let (,@(if query-params '((cl-user::query-params (list))))
+          `(let (,@(if path-params '((cl-user::path-params (list))))
+                 ,@(if query-params '((cl-user::query-params (list))))
                  ,@(if headers '((cl-user::headers (list))))
                  ,@(if body-params '((cl-user::body-params (list))))
                  ,@(if (and (media-type-form-p consumes-media-type)
@@ -341,29 +335,34 @@ the provided values meet any defined constraints."
                                   (media-type-form-p consumes-media-type)))
                      '((cl-user::req-body (make-hash-table)))))
              ;; Build up alist of query params
+             ,@(generate-http-request-population path-params 'cl-user::path-params)
              ,@(generate-http-request-population query-params 'cl-user::query-params)
              ,@(generate-http-request-population headers 'cl-user::headers)
              ,@(if (media-type-form-p consumes-media-type)
                    (generate-http-request-population form-params 'cl-user::form-params)
                    (generate-http-request-body-population body-params 'cl-user::req-body))
              ;; Make the request
-             (funcall (cl-user::http-request cl-user::client)
-                      (format nil ,(concatenate 'string
-                                                (if schemes (select-scheme schemes) "~a:")
-                                                "//~a~a"
-                                                path)
-                              cl-user::scheme
-                              (cl-user::host cl-user::client)
-                              (cl-user::base-path cl-user::client))
-                      :method ,(intern (string-upcase method) "KEYWORD")
-                      :content-type cl-user::consumes-media-type
-                      ,@(if headers `(:additional-headers cl-user::headers))
-                      ,@(if body-params
-                            `(:content (funcall (gethash cl-user::consumes-media-type
-                                                         (cl-user::encoder-from-media-type cl-user::client))
-                                                cl-user::req-body)))
-                      ,@(if query-params `(:parameters cl-user::query-params))
-                      ,@(if form-params `(:multipart-params cl-user::form-params))))))))
+             (flet ((cl-user::replace-path-params (cl-user::uri cl-user::path-vars)
+                      (funcall (cl-strings:make-template-parser "{" "}") cl-user::uri cl-user::path-vars)))
+               (funcall (cl-user::http-request cl-user::client)
+                        (format nil ,(concatenate 'string
+                                                  (if schemes (select-scheme schemes) "~a:")
+                                                  "//~a~a~a")
+                                cl-user::scheme
+                                (cl-user::host cl-user::client)
+                                (cl-user::base-path cl-user::client)
+                                ,(if path-params
+                                     `(cl-user::replace-path-params ,path cl-user::path-params)
+                                     path))
+                        :method ,(intern (string-upcase method) "KEYWORD")
+                        :content-type cl-user::consumes-media-type
+                        ,@(if headers `(:additional-headers cl-user::headers))
+                        ,@(if body-params
+                              `(:content (funcall (gethash cl-user::consumes-media-type
+                                                           (cl-user::encoder-from-media-type cl-user::client))
+                                                  cl-user::req-body)))
+                        ,@(if query-params `(:parameters cl-user::query-params))
+                        ,@(if form-params `(:multipart-params cl-user::form-params)))))))))
 
 (defun generate-check-type (parameters)
   (check-type parameters list)
@@ -423,17 +422,18 @@ parameters."
         (required-parameters (list))
         (optional-parameters (list))
         (declared-as-required (gethash "required" schema-object)))
-    (loop for prop-name being the hash-keys of schema-properties
-            using (hash-value prop)
-          for prop-type = (parameter-type prop)
-          for prop-desc = (gethash "description" prop)
-          for faux-param = (make-hash-table :test #'equalp)
-          do (setf (gethash "required" faux-param) (find prop-name declared-as-required :test #'string=)
-                   (gethash "name" faux-param) prop-name
-                   (gethash "type" faux-param) prop-type
-                   (gethash "in" faux-param) "body"
-                   (gethash "description" faux-param) prop-desc)
-             (if (find prop-name declared-as-required :test #'string=)
-                 (setf required-parameters (push faux-param required-parameters))
-                 (setf optional-parameters (push faux-param optional-parameters))))
+    (when schema-properties
+      (loop for prop-name being the hash-keys of schema-properties
+              using (hash-value prop)
+            for prop-type = (parameter-type prop)
+            for prop-desc = (gethash "description" prop)
+            for faux-param = (make-hash-table :test #'equalp)
+            do (setf (gethash "required" faux-param) (find prop-name declared-as-required :test #'string=)
+                     (gethash "name" faux-param) prop-name
+                     (gethash "type" faux-param) prop-type
+                     (gethash "in" faux-param) "body"
+                     (gethash "description" faux-param) prop-desc)
+               (if (find prop-name declared-as-required :test #'string=)
+                   (setf required-parameters (push faux-param required-parameters))
+                   (setf optional-parameters (push faux-param optional-parameters)))))
     (values required-parameters optional-parameters)))
