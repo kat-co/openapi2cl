@@ -184,21 +184,21 @@ code."
         ;; Enumerate through the known valid operations that we know
         ;; how to handle. Ignore all else.
         unless (find operation-name '("get" "put" "post" "delete"))
-          do (if body-param
-                 (multiple-value-bind (required-body-params optional-body-params)
-                     (generate-schema-object-parameters (gethash "schema" body-param))
-                   (setf required-parameters (append required-parameters required-body-params)
-                         optional-parameters (append optional-parameters optional-body-params))))
+          do (when body-param
+               (multiple-value-bind (required-body-params optional-body-params)
+                   (generate-schema-object-parameters (gethash "schema" body-param))
+                 (setf required-parameters (append required-parameters required-body-params)
+                       optional-parameters (append optional-parameters optional-body-params))))
         collect (let* ((param-descriptions (generate-parameter-comments (append required-parameters
-                                                                              optional-parameters)))
-                     (method-comment (concatenate 'string
-                                                  (if summary (format nil "~a~%~%" summary))
-                                                  (if description (format nil "~a~%~%" description))
-                                                  (if param-descriptions param-descriptions))))
-                ;; Generate a method for each operation
-                (generate-operation-method client-name method-name method-comment schemes path-name
-                                           operation-name global-media-types consumes-media-types
-                                           produces-media-types required-parameters optional-parameters))))
+                                                                                optional-parameters)))
+                       (method-comment (concatenate 'string
+                                                    (when summary (format nil "~a~%~%" summary))
+                                                    (when description (format nil "~a~%~%" description))
+                                                    (when param-descriptions param-descriptions))))
+                  ;; Generate a method for each operation
+                  (generate-operation-method client-name method-name method-comment schemes path-name
+                                             operation-name global-media-types consumes-media-types
+                                             produces-media-types required-parameters optional-parameters))))
 
 (defun generate-client (client-name schemes host base-path consumes-media-types produces-media-types)
   "Generates a client that all the methods will hang off of."
@@ -235,14 +235,14 @@ code."
        :documentation
        "The media-type to encode parameters to when operations do not declare a media-type."
        :initarg :consumes-media-type
-       ,@(if consumes-media-types `(:initform ,(select-media-type consumes-media-types)))
+       ,@(when consumes-media-types `(:initform ,(select-media-type consumes-media-types)))
        :accessor cl-user::consumes-media-type)
       (cl-user::produces-media-type
        :type string
        :documentation
        "The media-type to dencode results from when operations do not declare a media-type."
        :initarg :produces-media-type
-       ,@(if produces-media-types `(:initform ,(select-media-type produces-media-types)))
+       ,@(when produces-media-types `(:initform ,(select-media-type produces-media-types)))
        :accessor cl-user::produces-media-type)
       (cl-user::http-request
        :type function
@@ -269,7 +269,7 @@ the provided values meet any defined constraints."
   (check-type client-name symbol)
   (check-type method-name string)
   (check-type method-comment string)
-  (if schemes (assert (openapi-schemes-p schemes)))
+  (when schemes (assert (openapi-schemes-p schemes)))
   (check-type path string)
   (check-type method string)
   (check-type global-media-types list)
@@ -282,8 +282,8 @@ the provided values meet any defined constraints."
     ;; Generated method begins here
     `(defmethod ,(kebab-symbol-from-string method-name) ((cl-user::client ,client-name)
                                                          ,@lisp-required-parameters
-                                                         ,@(if lisp-optional-parameters
-                                                               `(&key ,@lisp-optional-parameters)))
+                                                         ,@(when lisp-optional-parameters
+                                                             `(&key ,@lisp-optional-parameters)))
        ,method-comment
        ,@(generate-check-type (append required-parameters optional-parameters))
        ,(let ((path-params (append
@@ -301,7 +301,7 @@ the provided values meet any defined constraints."
               (form-params (append
                             (remove-if-not #'parameter-location-form-p required-parameters)
                             (remove-if-not #'parameter-location-form-p optional-parameters)))
-              (consumes-media-type (if consumes-media-types (select-media-type consumes-media-types))))
+              (consumes-media-type (when consumes-media-types (select-media-type consumes-media-types))))
           ;; If the content-type requests form params, put all the
           ;; body parameters in the form params list. Otherwise, move
           ;; all the form parameters into the body list so that they
@@ -311,13 +311,13 @@ the provided values meet any defined constraints."
                     body-params nil)
               (setf body-params (append body-params form-params)
                     form-params nil))
-          `(let (,@(if path-params '((cl-user::path-params (list))))
-                 ,@(if query-params '((cl-user::query-params (list))))
-                 ,@(if headers '((cl-user::headers (list))))
-                 ,@(if body-params '((cl-user::body-params (list))))
-                 ,@(if (and (media-type-form-p consumes-media-type)
-                            form-params)
-                       '((cl-user::form-params (list))))
+          `(let (,@(when path-params '((cl-user::path-params (list))))
+                 ,@(when query-params '((cl-user::query-params (list))))
+                 ,@(when headers '((cl-user::headers (list))))
+                 ,@(when body-params '((cl-user::body-params (list))))
+                 ,@(when (and (media-type-form-p consumes-media-type)
+                              form-params)
+                     '((cl-user::form-params (list))))
                  ;; If we can't interpolate the scheme into the
                  ;; request URI's string, grab it from the client.
                  ,@(unless schemes `((cl-user::scheme (cl-user::scheme cl-user::client))))
@@ -356,27 +356,27 @@ the provided values meet any defined constraints."
                                      path))
                         :method ,(intern (string-upcase method) "KEYWORD")
                         :content-type cl-user::consumes-media-type
-                        ,@(if headers `(:additional-headers cl-user::headers))
-                        ,@(if body-params
-                              `(:content (funcall (gethash cl-user::consumes-media-type
-                                                           (cl-user::encoder-from-media-type cl-user::client))
-                                                  cl-user::req-body)))
-                        ,@(if query-params `(:parameters cl-user::query-params))
-                        ,@(if form-params `(:multipart-params cl-user::form-params)))))))))
+                        ,@(when headers `(:additional-headers cl-user::headers))
+                        ,@(when body-params
+                            `(:content (funcall (gethash cl-user::consumes-media-type
+                                                         (cl-user::encoder-from-media-type cl-user::client))
+                                                cl-user::req-body)))
+                        ,@(when query-params `(:parameters cl-user::query-params))
+                        ,@(when form-params `(:multipart-params cl-user::form-params)))))))))
 
 (defun generate-check-type (parameters)
   (check-type parameters list)
   (loop for param in parameters
         for param-name = (lisp-parameter-name param)
         for param-type = (parameter-type param)
-        for lisp-param-type = (if param-type (kebab-symbol-from-string param-type))
+        for lisp-param-type = (when param-type (kebab-symbol-from-string param-type))
         ;; Type must both be present and correspond to a check
         ;; function in order to perform type checking.
         when (find lisp-param-type '(string number integer array)
                    :test #'string=)
           collect (if (parameter-required-p param)
                       `(check-type ,param-name ,lisp-param-type)
-                      `(if ,param-name (check-type ,param-name ,lisp-param-type)))))
+                      `(when ,param-name (check-type ,param-name ,lisp-param-type)))))
 
 (defun generate-http-request-body-population (params req-body-name)
   (check-type params list)
@@ -385,7 +385,7 @@ the provided values meet any defined constraints."
         for lisp-param-name = (lisp-parameter-name param)
         for set-value-sexp = `(setf (gethash ,param-name ,req-body-name) ,lisp-param-name)
         collect
-        (if (parameter-required-p param) set-value-sexp `(if ,lisp-param-name ,set-value-sexp))))
+        (if (parameter-required-p param) set-value-sexp `(when ,lisp-param-name ,set-value-sexp))))
 
 (defun generate-http-request-population (params request-alist)
   "Generates code to populate an alist intended to be passed into an
@@ -398,7 +398,7 @@ http-request."
         collect
         (if (parameter-required-p param)
             `(setf ,request-alist (push (cons ,param-name ,lisp-param-name) ,request-alist))
-            `(if ,lisp-param-name (setf ,request-alist (push (cons ,param-name  ,lisp-param-name) ,request-alist))))))
+            `(when ,lisp-param-name (setf ,request-alist (push (cons ,param-name  ,lisp-param-name) ,request-alist))))))
 
 (defun generate-parameter-comments (parameters)
   "Generates a single string describing a list of parameters for
