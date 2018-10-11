@@ -70,14 +70,17 @@ methods for this client."
                (funcall process-results-fn output-path client-def methods-list)))))
     (mapcar #'with-file-generate (directory path))))
 
-(defun with-directory-generate-files (path)
+(defun with-directory-generate-files (input-path output-path)
   "Given a pathname, generate lisp files for every specification
 encountered and processed."
   (flet ((write-defs-out (file-path client-def methods-list)
-           (with-open-file (stream file-path :direction :output)
-             (format stream "~s~%~%" client-def)
-             (dolist (m methods-list) (format stream "~s~%~%" m)))))
-    (with-directory-generate path #'write-defs-out)))
+           (let ((file-path (make-pathname :defaults file-path
+                                           :directory output-path)))
+             (with-open-file (stream file-path :direction :output)
+               (format t "Output path: ~a~%" file-path)
+               (format stream "~s~%~%" client-def)
+               (dolist (m methods-list) (format stream "~s~%~%" m))))))
+    (with-directory-generate input-path #'write-defs-out)))
 
 ;;; Unexported
 
