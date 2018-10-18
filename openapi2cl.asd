@@ -1,4 +1,4 @@
-#-asdf3.1 (error "cl-agent requires >= ASDF 3.1")
+#-asdf3.1 (error "openapi2cl requires >= ASDF 3.1")
 
 (asdf:defsystem :openapi2cl
   :description "A library to generate a common-lisp client from OpenAPI files."
