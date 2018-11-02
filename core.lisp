@@ -70,16 +70,29 @@ methods for this client."
                (funcall process-results-fn output-path client-def methods-list)))))
     (mapcar #'with-file-generate (directory path))))
 
-(defun with-directory-generate-files (input-path output-path)
+(defun with-directory-generate-files (input-path output-path package-root &optional preamble)
   "Given a pathname, generate lisp files for every specification
-encountered and processed."
+encountered and processed.
+
+package-root will be used as the root of each file's package. The
+file's name will be appended to this forming the fully qualified
+package name."
+  (check-type package-root symbol)
   (flet ((write-defs-out (file-path client-def methods-list)
            (let ((file-path (make-pathname :defaults file-path
                                            :directory output-path)))
              (with-open-file (stream file-path :direction :output)
                (format t "Output path: ~a~%" file-path)
-               (format stream "~s~%~%" client-def)
-               (dolist (m methods-list) (format stream "~s~%~%" m))))))
+               (when preamble (format stream "~a~%~%" preamble))
+               (when package-root
+                 (dolist (pkg-clause (generate-package-clauses
+                                      (intern (string-upcase (format nil "~a/~a" package-root (pathname-name file-path))))
+                                      :packages-using '(#:cl)
+                                      :packages-import '(#:cl-strings)))
+                   (format stream "~s~%" pkg-clause))
+                 (format stream "~%~%"))
+               (format stream "~s" client-def)
+               (dolist (m methods-list) (format stream "~%~%~s" m))))))
     (with-directory-generate input-path #'write-defs-out)))
 
 ;;; Unexported
@@ -163,6 +176,18 @@ code."
   (let ((media-subtypes (mapcar #'media-type-subtype media-types)))
     (or (find-if (lambda (e) (or (string= e "json") (string= e "yaml"))) media-subtypes)
         (nth (random (length media-subtypes)) media-subtypes))))
+
+(defun generate-package-clauses (package-name &key packages-using packages-import)
+  (check-type package-name symbol)
+  (check-type packages-using list)
+  (check-type packages-import list)
+  `((in-package :cl-user)
+    (defpackage ,package-name
+      ,@(when packages-using `((:use ,@packages-using)))
+      ,@(when packages-import
+         (loop for pkg in packages-import
+               collect `(:import-from ,pkg))))
+    (in-package ,package-name)))
 
 (defun generate-path-methods (client-name path-name path global-media-types)
   (check-type client-name symbol)
