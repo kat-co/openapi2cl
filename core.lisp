@@ -81,7 +81,7 @@ package name."
   (flet ((write-defs-out (file-path client-def methods-list)
            (let ((file-path (make-pathname :defaults file-path
                                            :directory output-path)))
-             (with-open-file (stream file-path :direction :output)
+             (with-open-file (stream file-path :direction :output :if-exists :overwrite)
                (format t "Output path: ~a~%" file-path)
                (when preamble (format stream "~a~%~%" preamble))
                (when package-root
