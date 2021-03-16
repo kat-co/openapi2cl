@@ -4,6 +4,7 @@
   (:import-from #:yason)
   (:import-from #:cl-yaml)
   (:import-from #:cl-strings)
+  (:import-from #:kebab)
   (:export
    #:with-directory-generate-files
    #:with-directory-generate
@@ -16,7 +17,7 @@
 ;; namespace; otherwise the symbols in the generated code will be
 ;; prepended by this package's namespace.
 
-(defun generate (openapi client-name)
+(defun generate (root-path openapi client-name)
   "Generates a client and a list of its methods. These are returned in
 a 2-tuple.
 
@@ -29,28 +30,39 @@ client-name: the name of the class that hosts all the client methods."
          (produces-media-types (gethash "produces" openapi))
          (schemes (or (gethash "schemes" openapi)
                       '("https")))
+         (security-schemas (security-schemas-from-hash-table
+                            (resolve-object root-path (gethash "securityDefinitions" openapi))))
          (client (generate-client client-name schemes host base-path
-                                  consumes-media-types produces-media-types)))
+                                  consumes-media-types produces-media-types
+                                  security-schemas)))
     (values
      client
      (loop for path-name being the hash-keys of (gethash "paths" openapi)
              using (hash-value path-operation)
            nconc (generate-path-methods client-name path-name path-operation
-                                          consumes-media-types)))))
+                                        consumes-media-types security-schemas)))))
 
-(defun with-yaml-generate (openapi-yaml client-name)
+(defun with-yaml-generate (root-path openapi-yaml client-name)
   "Generate a client and a list of its methods based on a YAML file.
 
+root-path: The root path of the Yaml file.
 openapi-yaml: a string containing the YAML representation of a openapi document, or a pathname to a YAML document.
 client-name: the name of the class that hosts all the client methods."
-  (generate (yaml:parse openapi-yaml) client-name))
+  (check-type root-path (or string pathname))
+  (check-type openapi-yaml (or string pathname))
+  (check-type client-name symbol)
+  (generate root-path (yaml:parse openapi-yaml) client-name))
 
-(defun with-json-generate (openapi-json client-name)
+(defun with-json-generate (root-path openapi-json client-name)
   "Generate a client and a list of its methods based on a YAML file.
 
+root-path: The root path of the Json file.
 openapi-json: a string containing the JSON representation of a openapi document, or a pathname to a JSON document.
 client-name: the name of the class that hosts all the client methods."
-  (generate (yason:parse openapi-json) client-name))
+  (check-type root-path (or string pathname))
+  (check-type openapi-json (or string pathname))
+  (check-type client-name symbol)
+  (generate root-path (yason:parse openapi-json) client-name))
 
 (defun with-directory-generate (path process-results-fn)
   "Given a pathname, process the YAML and JSON files within, and
@@ -64,9 +76,9 @@ methods for this client."
                   (output-path (make-pathname :type "lisp" :defaults file-path)))
              (multiple-value-bind (client-def methods-list)
                  (cond ((string= type "yaml")
-                        (with-yaml-generate file-path name))
+                        (with-yaml-generate (uiop:pathname-directory-pathname file-path) file-path name))
                        ((string= type "json")
-                        (with-json-generate file-path name)))
+                        (with-json-generate (uiop:pathname-directory-pathname file-path) file-path name)))
                (funcall process-results-fn output-path client-def methods-list)))))
     (mapcar #'with-file-generate (directory path))))
 
@@ -80,30 +92,56 @@ package name."
   (check-type package-root symbol)
   (flet ((write-defs-out (file-path client-def methods-list)
            (let ((file-path (make-pathname :defaults file-path
-                                           :directory output-path)))
-             (with-open-file (stream file-path :direction :output :if-exists :overwrite)
+                                           :directory output-path))
+                 (*package* (find-package :cl-user)))
+             (with-open-file (stream file-path :direction :output :if-exists :supersede)
                (format t "Output path: ~a~%" file-path)
-               (when preamble (format stream "~a~%~%" preamble))
+               (when preamble (format stream "~a~%~%" preamble)
+                     (finish-output))
                (when package-root
                  (dolist (pkg-clause (generate-package-clauses
                                       (intern (string-upcase (format nil "~a/~a" package-root (pathname-name file-path))))
                                       :packages-using '(#:cl)
                                       :packages-import '(#:cl-strings)))
-                   (format stream "~s~%" pkg-clause))
+                   (format stream "~s~%" pkg-clause)
+                   (finish-output))
                  (format stream "~%~%"))
-               (format stream "~s" client-def)
-               (dolist (m methods-list) (format stream "~%~%~s" m))))))
+               (format stream "~s~%" client-def)
+               (finish-output)
+               (dolist (m methods-list) (format stream "~%~%~s~%" m) (finish-output stream))))))
     (with-directory-generate input-path #'write-defs-out)))
 
 ;;; Unexported
+
+(defun resolve-ref (ref)
+  "Returns the referenced object"
+  (check-type ref pathname)
+  (let ((type (pathname-type ref)))
+    (when (equalp type "yaml")
+      (return-from resolve-ref (yaml:parse ref)))
+    (when (equalp type "json")
+      (return-from resolve-ref (yason:parse ref)))
+    (error "cannot resolve references of type ~a" type)))
+
+(defun resolve-object (root-path object)
+  "If OBJECT is a reference, then return the referenced object.
+Otherwise, just return the object."
+  (check-type root-path (or pathname string))
+  (check-type object (or hash-table null))
+  (unless object (return-from resolve-object nil))
+  (alexandria:if-let (val (gethash "$ref" object))
+    (resolve-ref (merge-pathnames val root-path))
+    object))
 
 (defun parameter-name (param)
   (check-type param hash-table)
   (gethash "name" param))
 
-(defun kebab-symbol-from-string (s)
+(defun kebab-symbol-from-string (s &optional package)
   (check-type s string)
-  (intern (string-upcase (cl-strings:kebab-case s :delimiter #\_))))
+  (if package
+      (intern (string-upcase (kebab:to-lisp-case s)) package)
+      (intern (string-upcase (kebab:to-lisp-case s)))))
 
 (defun lisp-parameter-name (param)
   "Converts a string parameter name to a symbol for use in generated
@@ -189,11 +227,12 @@ code."
                collect `(:import-from ,pkg))))
     (in-package ,package-name)))
 
-(defun generate-path-methods (client-name path-name path global-media-types)
+(defun generate-path-methods (client-name path-name path global-media-types security-schemas)
   (check-type client-name symbol)
   (check-type path-name string)
   (check-type path hash-table)
   (check-type global-media-types list)
+  (check-type security-schemas list)
   (loop for operation-name being the hash-keys of path
           using (hash-value operation)
         for summary = (gethash "summary" operation)
@@ -204,6 +243,7 @@ code."
         for responses = (gethash "responses" operation)
         for schemes = (gethash "schemes" operation)
         for parameters = (gethash "parameters" operation)
+        for security-requirement = (gethash "security" operation)
         ;; Synthesized fields
         for body-param = (find-if #'parameter-location-schema-p parameters)
         for method-name = (if operation-id operation-id (format nil "~a-~a" operation-name path-name))
@@ -226,9 +266,20 @@ code."
                   ;; Generate a method for each operation
                   (generate-operation-method client-name method-name method-comment schemes path-name
                                              operation-name global-media-types consumes-media-types
-                                             produces-media-types required-parameters optional-parameters))))
+                                             produces-media-types required-parameters optional-parameters
+                                             (select-security-requirement security-schemas
+                                                                          security-requirement)))))
 
-(defun generate-client (client-name schemes host base-path consumes-media-types produces-media-types)
+(defun select-security-requirement (security-schemas security-requirements)
+  "Selects a security requirement from the list of options in an
+opinionated way. This algorithm prefers API Keys"
+  (check-type security-schemas list)
+  (check-type security-requirements list)
+  (when security-requirements
+    (car security-schemas)))
+
+(defun generate-client (client-name schemes host base-path consumes-media-types
+                        produces-media-types security-schemas)
   "Generates a client that all the methods will hang off of."
   (check-type client-name symbol)
   (assert (openapi-schemes-p schemes))
@@ -236,11 +287,13 @@ code."
   (check-type base-path string)
   (check-type consumes-media-types list)
   (check-type produces-media-types list)
+  (check-type security-schemas list)
   `(defclass ,client-name ()
      ((cl-user::scheme
        :type string
        :documentation
-       "The scheme to use for requests when the operation doesn't provide a preference of its own."
+       "The scheme to use for requests when the operation doesn't
+provide a preference of its own."
        :initarg :schemes
        :initform ,(select-scheme schemes)
        :accessor cl-user::scheme)
@@ -284,11 +337,19 @@ code."
        "A hash table where the keys are media types the client can handle, and the values are functions which encode these media types to strings for inclusion into the http request."
        :initarg :encoder-from-media-type
        :initform (make-hash-table :test #'equalp)
-       :accessor cl-user::encoder-from-media-type))))
+       :accessor cl-user::encoder-from-media-type)
+      ,@(loop for (name . schema) in security-schemas
+              for lisp-name = (kebab-symbol-from-string (name schema))
+              when (eq (security-type schema) 'api-key)
+                collect `(,lisp-name
+                          :type string
+                          :documentation
+                          ,(description schema)
+                          :accessor ,lisp-name)))))
 
 (defun generate-operation-method (client-name method-name method-comment schemes path
                                   method global-media-types consumes-media-types produces-media-types
-                                  required-parameters optional-parameters)
+                                  required-parameters optional-parameters security-requirement)
   "Generates a method for a generated client. Methods distinguish
 between required parameters and optional parameters, and optional
 parameters are defined as &key arguments. All arguments are run
@@ -305,6 +366,7 @@ the provided values meet any defined constraints."
   (check-type produces-media-types list)
   (check-type required-parameters list)
   (check-type optional-parameters list)
+  (check-type security-requirement list)
   (let ((lisp-required-parameters (mapcar #'lisp-parameter-name required-parameters))
         (lisp-optional-parameters (mapcar #'lisp-parameter-name optional-parameters)))
     ;; Generated method begins here
@@ -365,6 +427,13 @@ the provided values meet any defined constraints."
              ;; Build up alist of query params
              ,@(generate-http-request-population path-params 'cl-user::path-params)
              ,@(generate-http-request-population query-params 'cl-user::query-params)
+             ,(when (and security-requirement
+                         (eq (security-type (cdr security-requirement)) 'api-key))
+                (let ((accessor (kebab-symbol-from-string (car security-requirement)))
+                      (requirement (cdr security-requirement)))
+                  `(setf cl-user::query-params (push (cons ,(name requirement)
+                                                  (,accessor cl-user::client))
+                                                     cl-user::query-params))))
              ,@(generate-http-request-population headers 'cl-user::headers)
              ,@(if (media-type-form-p consumes-media-type)
                    (generate-http-request-population form-params 'cl-user::form-params)
@@ -465,3 +534,81 @@ parameters."
                    (setf required-parameters (push faux-param required-parameters))
                    (setf optional-parameters (push faux-param optional-parameters)))))
     (values required-parameters optional-parameters)))
+
+;;; Security Scheme Objects
+
+(deftype variable-location () '(member query header path body form-data))
+
+(defclass schema-variable ()
+  ((name
+    :type string
+    :documentation
+    "The name of the header or query parameter to be used."
+    :initarg :name
+    :reader name)
+   (in
+    :type variable-location
+    :documentation
+    "Where in the HTTP request the variable is placed. Valid values
+are '(query header path body form-data)"
+    :initarg :in
+    :reader in)))
+
+(deftype flow () '(member implicit password application access-code))
+(deftype security-type () '(member basic api-key oauth2))
+
+(defun security-schemas-from-hash-table (raw)
+  "Collects security schemas into an alist of (name . instance)."
+  (check-type raw (or hash-table null))
+  (unless raw (return-from security-schemas-from-hash-table (list)))
+  (loop for schema-name being the hash-keys of raw
+        for schema being the hash-values of raw
+        collect (cons
+                 schema-name
+                 (make-instance 'security-schema
+                                :name (gethash "name" schema)
+                                :in (kebab-symbol-from-string (gethash "in" schema) :openapi2cl/core)
+                                :type (kebab-symbol-from-string (gethash "type" schema) :openapi2cl/core)
+                                :description (gethash "description" schema)
+                                :flow (alexandria:when-let (flow (gethash "flow" schema)) (intern flow))
+                                :authorization-url (gethash "authorizationUrl" schema)
+                                :token-url (gethash "tokenUrl" schema)
+                                :scopes (gethash "scopes" schema)))))
+
+(defclass security-schema (schema-variable)
+  ((type
+    :type security-type
+    :documentation
+    "The type of the security scheme."
+    :initarg :type
+    :initform (error "type not specified")
+    :reader security-type)
+   (description
+    :type (or string null)
+    :documentation
+    "A short description for security scheme."
+    :initarg :description
+    :reader description)
+   (flow
+    :type (or flow null)
+    :documentation
+    "The flow used by the OAuth2 security scheme."
+    :initarg :flow)
+   (authorization-url
+    :type (or string null)
+    :documentation
+    "The authorization URL to be used for this flow. This SHOULD be in
+the form of a URL."
+    :initarg :authorization-url)
+   (token-url
+    :type (or string null)
+    :documentation
+    "The token URL to be used for this flow. This SHOULD be in the
+form of a URL."
+    :initarg :token-url)
+   (scopes
+    :documentation
+    "The available scopes for the OAuth2 security scheme."
+    :initarg :scopes))
+  (:documentation
+   "A security schema that an OpenAPI endpoint accepts."))
