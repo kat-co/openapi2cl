@@ -96,19 +96,16 @@ package name."
                  (*package* (find-package :cl-user)))
              (with-open-file (stream file-path :direction :output :if-exists :supersede)
                (format t "Output path: ~a~%" file-path)
-               (when preamble (format stream "~a~%~%" preamble)
-                     (finish-output))
+               (when preamble (format stream "~a~%~%" preamble))
                (when package-root
                  (dolist (pkg-clause (generate-package-clauses
                                       (intern (string-upcase (format nil "~a/~a" package-root (pathname-name file-path))))
                                       :packages-using '(#:cl)
                                       :packages-import '(#:cl-strings)))
-                   (format stream "~s~%" pkg-clause)
-                   (finish-output))
+                   (format stream "~s~%" pkg-clause))
                  (format stream "~%~%"))
                (format stream "~s~%" client-def)
-               (finish-output)
-               (dolist (m methods-list) (format stream "~%~%~s~%" m) (finish-output stream))))))
+               (dolist (m methods-list) (format stream "~%~%~s~%" m))))))
     (with-directory-generate input-path #'write-defs-out)))
 
 ;;; Unexported
@@ -402,7 +399,10 @@ the provided values meet any defined constraints."
               (setf body-params (append body-params form-params)
                     form-params nil))
           `(let (,@(when path-params '((cl-user::path-params (list))))
-                 ,@(when query-params '((cl-user::query-params (list))))
+                 ,@(when (or query-params
+                             (and security-requirement
+                                  (eq (security-type (cdr security-requirement)) 'api-key)))
+                     '((cl-user::query-params (list))))
                  ,@(when headers '((cl-user::headers (list))))
                  ,@(when body-params '((cl-user::body-params (list))))
                  ,@(when (and (media-type-form-p consumes-media-type)
@@ -432,7 +432,7 @@ the provided values meet any defined constraints."
                 (let ((accessor (kebab-symbol-from-string (car security-requirement)))
                       (requirement (cdr security-requirement)))
                   `(setf cl-user::query-params (push (cons ,(name requirement)
-                                                  (,accessor cl-user::client))
+                                                           (,accessor cl-user::client))
                                                      cl-user::query-params))))
              ,@(generate-http-request-population headers 'cl-user::headers)
              ,@(if (media-type-form-p consumes-media-type)
